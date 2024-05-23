@@ -130,12 +130,14 @@ namespace ViolationVideoServer
                                 if (bodyLength > buffer.Length)
                                 {
                                     SendToClient(SendHeader("application/json", 0, StatusCode.ExpectationFailed).ToString(), client);
+                                    Messages?.Invoke($"Sent error {StatusCode.ExpectationFailed} to client");
                                 }
 
                                 bool expect = Regex.IsMatch(reader, "((?<=(?i)Expect: ).*)");
                                 if (expect && !reader.Contains("HTTP/1.0"))
                                 {
                                     SendToClient(SendHeader("application/json", 0, StatusCode.Expect100).ToString(), client);
+                                    Messages?.Invoke($"Sent  {StatusCode.Expect100} to client");
                                     continue;
                                 }
                             }
@@ -174,10 +176,12 @@ namespace ViolationVideoServer
             {
                 Trigger?.Invoke(mtch.Groups[1].Value);
                 SendToClient(SendHeader("application/json", 0, StatusCode.OK).ToString(), client);
+                Messages?.Invoke($"Sent  {StatusCode.OK} to client");
             }
             else
             {
                 SendToClient(SendHeader("application/json", 0, StatusCode.BadRequest).ToString(), client);
+                Messages?.Invoke($"Sent  error {StatusCode.BadRequest} to client");
             }
         }
 

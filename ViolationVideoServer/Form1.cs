@@ -10,6 +10,7 @@ using System.Data;
 using System.Diagnostics;
 using System.Diagnostics.Tracing;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -27,6 +28,7 @@ namespace ViolationVideoServer
         private HTTPServer server;
         ConcurrentDictionary<DateTime, byte[]> imagens = new ConcurrentDictionary<DateTime, byte[]>();
         private ConcurrentQueue<byte[]> receivedFrames = new ConcurrentQueue<byte[]>();
+        private ConcurrentQueue<Image> framesToShow = new ConcurrentQueue<Image>();
         private int maxArrayLength = 300; //3000 em um framerate de 10fps = 300s = 5min
 
 
@@ -34,26 +36,23 @@ namespace ViolationVideoServer
         private int timeAfter = 3;
         private int minNumOffFrames = 30;
         private int cameraFramerate = 10;
+        private int quality = 70;
 
         private int currentMs = 0;
 
-        private string olderFramesPath = Application.StartupPath + "/OlderFrames";
-        private string outputVideos = Application.StartupPath + "/OutputVideos";
+        private string olderFramesPath = Environment.CurrentDirectory + "/OlderFrames";
+        private string outputVideos = Environment.CurrentDirectory + "/OutputVideos";
 
         List<ImageField.TypeOfField> desired = new List<ImageField.TypeOfField>() { ImageField.TypeOfField.Horario, ImageField.TypeOfField.TempoCaptura };
+
+        protected bool running = false;
+
+        ManualResetEvent mreDelay = new ManualResetEvent(false);
 
 
         public Form1()
         {
             InitializeComponent();
-            server = new HTTPServer(51000);
-            server.Messages += Server_MessagesHandler;
-            server.Trigger += Server_Trigger;
-            var _videoPath = "http://" + "192.168.50.172" + $"/api/mjpegvideo.cgi?framerate={cameraFramerate}";
-            _frameVideo = new MJPEGStream(_videoPath);
-            _frameVideo.Login = "admin";
-            _frameVideo.Password = "1234";
-            _frameVideo.NewFrame += _frameVideo_NewFrame;
         }
 
         private void Server_Trigger(string message)
@@ -121,27 +120,27 @@ namespace ViolationVideoServer
             List<byte[]> frames = new List<byte[]>();
 
 
-            Debug.WriteLine($"Inicial: {startPosition.ToString()} - Ultimo frame {imagens.Keys.Last().ToString()}");
+            //Debug.WriteLine($"Inicial: {startPosition.ToString()} - Ultimo frame {imagens.Keys.Last().ToString()}");
             //if (startPosition <= imagens.Keys.Last())
             //{
-                int lastFramesCount = 0;
-                do
+            int lastFramesCount = 0;
+            do
+            {
+                frames = FilterDict(startPosition, (timeAfter + timeBefore));
+
+
+                //if (frames.Count / cameraFramerate >= timeAfter + timeBefore)
+                if (frames.Count != 0 && frames.Count == lastFramesCount)
                 {
-                    frames = FilterDict(startPosition, (timeAfter + timeBefore));
-
-
-                    //if (frames.Count / cameraFramerate >= timeAfter + timeBefore)
-                    if (frames.Count != 0 && frames.Count == lastFramesCount)
-                    {
-                        numFramesOK = true;
-                    }
-                    else
-                    {
-                        lastFramesCount = frames.Count;
-                    }
-                    double timeToSleep = Math.Round((timeAfter + timeBefore) - (double)frames.Count / cameraFramerate, MidpointRounding.AwayFromZero);
-                    Thread.Sleep((int)timeToSleep * 1000);
-                } while (!numFramesOK);
+                    numFramesOK = true;
+                }
+                else
+                {
+                    lastFramesCount = frames.Count;
+                }
+                double timeToSleep = Math.Round((timeAfter + timeBefore) - (double)frames.Count / cameraFramerate, MidpointRounding.AwayFromZero);
+                Thread.Sleep((int)timeToSleep * 1000);
+            } while (!numFramesOK);
             //}
             //else
             //{
@@ -183,10 +182,11 @@ namespace ViolationVideoServer
 
             try
             {
-                AVIWriter writer = new AVIWriter();
-                // create new AVI file and open it
+                AVIWriter writer = new AVIWriter("mpg4");
+                int realframerate = frames.Count / (timeBefore + timeAfter);
+                textBox1.AppendText($"Real video framerate: {realframerate}{Environment.NewLine}");
+                writer.FrameRate = realframerate;
                 writer.Open($"{outputVideos}/{inf.ImageName}.avi", 1280, 960);
-                // create frame image
                 foreach (var frame in frames)
                 {
                     using (MemoryStream ms = new MemoryStream(frame))
@@ -200,10 +200,10 @@ namespace ViolationVideoServer
             catch (Exception ex)
             {
 
-              
+
             }
-           
-            
+
+
 
             Invoke((MethodInvoker)delegate
             {
@@ -213,10 +213,13 @@ namespace ViolationVideoServer
 
         private async void _frameVideo_NewFrame(object sender, NewFrameEventArgs eventArgs)
         {
+
             using (var stream = new MemoryStream())
             {
+                //framesToShow.Enqueue((Image)eventArgs.Frame.Clone());
                 eventArgs.Frame.Save(stream, System.Drawing.Imaging.ImageFormat.Jpeg);
                 receivedFrames.Enqueue(stream.ToArray());
+
                 FillingDictionary();
             }
         }
@@ -262,7 +265,7 @@ namespace ViolationVideoServer
                             {
                                 if (imagens.Count > maxArrayLength)
                                 {
-                                    RemoveOlderFrame();
+                                    RemoveOlderFrame(false);
                                     stop = true;
                                 }
                             }
@@ -304,25 +307,77 @@ namespace ViolationVideoServer
         {
             if (btnStart.Text == "Start")
             {
+                running = true;
+                server = new HTTPServer(51000);
+                server.Messages += Server_MessagesHandler;
+                server.Trigger += Server_Trigger;
+                cameraFramerate = (int)nupframerate.Value;
+                quality = (int)nupQuality.Value;
+                timeBefore = (int)nupBefore.Value;
+                timeAfter = (int)nupAfter.Value;
+                var _videoPath = $"http://{tbxCameraIP.Text}/api/mjpegvideo.cgi?framerate={cameraFramerate}&quality={quality}";
+                _frameVideo = new MJPEGStream(_videoPath);
+                _frameVideo.Login = "admin";
+                _frameVideo.Password = "1234";
+                _frameVideo.NewFrame += _frameVideo_NewFrame;
+
                 btnStart.Text = "Stop";
                 _frameVideo.Start();
                 server.Start();
+                //_ = ShowVideo();
             }
             else
             {
+                running = false;
                 btnStart.Text = "Start";
                 _frameVideo.Stop();
                 server.Stop();
+                server = null;                
+                textBox1.AppendText("Process was aborted by user\r\n");
+            }
+        }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+
+        }
+
+        private async Task ShowVideo()
+        {
+            while (running)
+            {
+                Image currentImage;
+                if (framesToShow.TryDequeue(out currentImage))
+                {
+                    Invoke((MethodInvoker)delegate
+                    {
+
+                        using (var srce = currentImage)
+                        {
+                            var dest = new Bitmap(pctVideo.Width, pctVideo.Height, PixelFormat.Format32bppPArgb);
+                            using (var gr = Graphics.FromImage(dest))
+                            {
+                                gr.DrawImage(srce, new Rectangle(Point.Empty, dest.Size));
+                            }
+                            pctVideo.Image = dest;
+                        }
+                    });
+                }
+                mreDelay.WaitOne(50);
             }
         }
     }
 
-    public class TriggerInfo
-    {
-        public string CameraDateTime { get; set; }
-        public string SystemDateTime { get; set; }
-        public string ImageName { get; set; }
-        public string SerialNumber { get; set; }
-        public long ElapsedTime { get; set; }
-    }
+
+
+
+
+public class TriggerInfo
+{
+    public string CameraDateTime { get; set; }
+    public string SystemDateTime { get; set; }
+    public string ImageName { get; set; }
+    public string SerialNumber { get; set; }
+    public long ElapsedTime { get; set; }
+}
 }
