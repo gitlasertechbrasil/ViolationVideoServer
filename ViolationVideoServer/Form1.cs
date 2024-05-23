@@ -3,15 +3,18 @@ using AForge.Video;
 using br.com.ltb.Camera.Pumatronix;
 using Newtonsoft.Json;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
 using System.Diagnostics;
+using System.Diagnostics.Tracing;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -22,8 +25,9 @@ namespace ViolationVideoServer
 
         private MJPEGStream _frameVideo;
         private HTTPServer server;
-        Dictionary<DateTime, byte[]> imagens = new Dictionary<DateTime, byte[]>();
-        private int maxArrayLength = 3000; //em um framerate de 10fps = 300s = 5min
+        ConcurrentDictionary<DateTime, byte[]> imagens = new ConcurrentDictionary<DateTime, byte[]>();
+        private ConcurrentQueue<byte[]> receivedFrames = new ConcurrentQueue<byte[]>();
+        private int maxArrayLength = 300; //3000 em um framerate de 10fps = 300s = 5min
 
 
         private int timeBefore = 1;
@@ -36,7 +40,7 @@ namespace ViolationVideoServer
         private string olderFramesPath = Application.StartupPath + "/OlderFrames";
         private string outputVideos = Application.StartupPath + "/OutputVideos";
 
-
+        List<ImageField.TypeOfField> desired = new List<ImageField.TypeOfField>() { ImageField.TypeOfField.Horario, ImageField.TypeOfField.TempoCaptura };
 
 
         public Form1()
@@ -92,8 +96,9 @@ namespace ViolationVideoServer
 
             DateTime endPosition = startPosition.AddSeconds(offsetInSeconds);
 
+            var currentList = new List<KeyValuePair<DateTime, byte[]>>(imagens.ToArray());
 
-            var filtered = imagens.Where(i => i.Key >= startPosition && i.Key <= endPosition);
+            var filtered = currentList.Where(i => i.Key >= startPosition && i.Key <= endPosition).ToList();
 
 
             foreach (var i in filtered)
@@ -106,37 +111,45 @@ namespace ViolationVideoServer
 
         private async Task SaveVideo(TriggerInfo inf)
         {
-            _ = Task.Factory.StartNew(() =>
-            {
-                Stopwatch stp = new Stopwatch();
-                stp.Start();
 
-                bool numFramesOK = false;
-                DateTime startPosition = DateTime.Now.AddSeconds(timeBefore * -1);
+            Stopwatch stp = new Stopwatch();
+            stp.Start();
 
-                List<byte[]> frames = new List<byte[]>();
+            bool numFramesOK = false;
+            DateTime startPosition = DateTime.Now.AddSeconds(timeBefore * -1);
+
+            List<byte[]> frames = new List<byte[]>();
 
 
-                if (startPosition <= imagens.Keys.Last())
+            Debug.WriteLine($"Inicial: {startPosition.ToString()} - Ultimo frame {imagens.Keys.Last().ToString()}");
+            //if (startPosition <= imagens.Keys.Last())
+            //{
+                int lastFramesCount = 0;
+                do
                 {
-                    do
+                    frames = FilterDict(startPosition, (timeAfter + timeBefore));
+
+
+                    //if (frames.Count / cameraFramerate >= timeAfter + timeBefore)
+                    if (frames.Count != 0 && frames.Count == lastFramesCount)
                     {
-                        frames = FilterDict(startPosition, (timeAfter + timeBefore));
+                        numFramesOK = true;
+                    }
+                    else
+                    {
+                        lastFramesCount = frames.Count;
+                    }
+                    double timeToSleep = Math.Round((timeAfter + timeBefore) - (double)frames.Count / cameraFramerate, MidpointRounding.AwayFromZero);
+                    Thread.Sleep((int)timeToSleep * 1000);
+                } while (!numFramesOK);
+            //}
+            //else
+            //{
+            //    frames = GetVideoFromFrameFiles(startPosition, startPosition.AddSeconds((timeAfter + timeBefore)));
+            //}
 
-                        if (frames.Count / cameraFramerate >= timeAfter + timeBefore)
-                        {
-                            numFramesOK = true;
-                        }
+            EncodingAndSave(frames, inf);
 
-                    } while (!numFramesOK);
-                }
-                else
-                {
-                    frames = GetVideoFromFrameFiles(startPosition, startPosition.AddSeconds((timeAfter + timeBefore)));
-                }
-
-                EncodingAndSave(frames, inf);
-            });
         }
 
         private List<byte[]> GetVideoFromFrameFiles(DateTime startPosition, DateTime endPosition)
@@ -168,20 +181,29 @@ namespace ViolationVideoServer
                 Directory.CreateDirectory(outputVideos);
             }
 
-            // instantiate AVI writer, use WMV3 codec
-            AVIWriter writer = new AVIWriter("wmv3");
-            // create new AVI file and open it
-            writer.Open($"{inf.ImageName}.avi", 1280, 960);
-            // create frame image
-            foreach (var frame in frames)
+            try
             {
-                using (MemoryStream ms = new MemoryStream(frame))
+                AVIWriter writer = new AVIWriter();
+                // create new AVI file and open it
+                writer.Open($"{outputVideos}/{inf.ImageName}.avi", 1280, 960);
+                // create frame image
+                foreach (var frame in frames)
                 {
-                    Bitmap image = (Bitmap)Image.FromStream(ms);
-                    writer.AddFrame(image);
+                    using (MemoryStream ms = new MemoryStream(frame))
+                    {
+                        Bitmap image = (Bitmap)Image.FromStream(ms);
+                        writer.AddFrame(image);
+                    }
                 }
+                writer.Close();
             }
-            writer.Close();
+            catch (Exception ex)
+            {
+
+              
+            }
+           
+            
 
             Invoke((MethodInvoker)delegate
             {
@@ -189,57 +211,76 @@ namespace ViolationVideoServer
             });
         }
 
-        private void _frameVideo_NewFrame(object sender, NewFrameEventArgs eventArgs)
+        private async void _frameVideo_NewFrame(object sender, NewFrameEventArgs eventArgs)
         {
-            if (IsHandleCreated)
+            using (var stream = new MemoryStream())
             {
-                Invoke((MethodInvoker)delegate
+                eventArgs.Frame.Save(stream, System.Drawing.Imaging.ImageFormat.Jpeg);
+                receivedFrames.Enqueue(stream.ToArray());
+                FillingDictionary();
+            }
+        }
+
+        private void FillingDictionary()
+        {
+            Stopwatch stp = new Stopwatch();
+
+            _ = Task.Factory.StartNew(() =>
+            {
+                stp.Start();
+                try
                 {
-                    try
+
+                    while (receivedFrames.Count > 0)
                     {
-                        try
+                        stp.Restart();
+                        byte[] currentImage;
+
+                        if (receivedFrames.TryDequeue(out currentImage))
                         {
-                            using (var stream = new MemoryStream())
+                            var data = new ImageData(currentImage, desired);
+                            DateTime imgDateTime = DateTime.Parse(data.SortedFields[ImageField.TypeOfField.Horario]);
+
+                            if (imagens.ContainsKey(imgDateTime) || imagens.ContainsKey(imgDateTime.AddMilliseconds(currentMs)))
                             {
-                                eventArgs.Frame.Save(stream, System.Drawing.Imaging.ImageFormat.Jpeg);
-                                var desired = new List<ImageField.TypeOfField>() { ImageField.TypeOfField.Horario };
-                                var data = new ImageData(stream.ToArray(), desired);
-                                DateTime imgDateTime = DateTime.Parse(data.SortedFields[ImageField.TypeOfField.Horario]);
-
-                                if (imagens.ContainsKey(imgDateTime))
+                                currentMs = currentMs + 1000 / cameraFramerate;
+                                if (currentMs > 1000)
                                 {
-                                    currentMs = currentMs + 1000 / cameraFramerate;
-                                    if (currentMs > 1000)
-                                    {
-                                        //pequena gambeta para evitar passar o segundo
-                                        currentMs = currentMs - (1000 / cameraFramerate) + (1000 / (cameraFramerate * 2));
-                                    }
-
-                                    imgDateTime = imgDateTime.AddMilliseconds(currentMs);
-                                }
-                                else
-                                {
-                                    currentMs = 0;
+                                    //pequena gambeta para evitar passar o segundo
+                                    currentMs = currentMs - (1000 / cameraFramerate) + (1000 / (cameraFramerate * 2));
                                 }
 
-                                imagens.Add(imgDateTime, stream.ToArray());
+                                imgDateTime = imgDateTime.AddMilliseconds(currentMs);
+                            }
+                            else
+                            {
+                                currentMs = 0;
+                            }
+
+                            bool stop = false;
+                            if (imagens.TryAdd(imgDateTime, currentImage))
+                            {
                                 if (imagens.Count > maxArrayLength)
                                 {
                                     RemoveOlderFrame();
+                                    stop = true;
                                 }
                             }
+                            stp.Stop();
+                            if (stop)
+                            {
+                                var a = stp.ElapsedMilliseconds;
+                            }
                         }
-                        catch (Exception ex)
-                        {
-                        }
-                    }
-                    catch (Exception ex)
-                    {
 
                     }
-                });
-            }
+                }
+                catch (Exception ex)
+                {
+                }
+            });
         }
+
 
         private void RemoveOlderFrame(bool save = true)
         {
@@ -255,7 +296,8 @@ namespace ViolationVideoServer
                 File.WriteAllBytes($"{olderFramesPath}/{imagens.Keys.First().ToString("yyyyMMddHHmmssfff")}.jpg", toSave);
             }
 
-            imagens.Remove(imagens.Keys.First());
+            byte[] removedValue;
+            imagens.TryRemove(imagens.Keys.First(), out removedValue);
         }
 
         private void button1_Click(object sender, EventArgs e)
@@ -280,5 +322,7 @@ namespace ViolationVideoServer
         public string CameraDateTime { get; set; }
         public string SystemDateTime { get; set; }
         public string ImageName { get; set; }
+        public string SerialNumber { get; set; }
+        public long ElapsedTime { get; set; }
     }
 }
