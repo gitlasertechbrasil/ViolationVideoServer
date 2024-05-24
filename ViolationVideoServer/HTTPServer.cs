@@ -32,7 +32,7 @@ namespace ViolationVideoServer
         public delegate void TriggerHandler(string message);
         public event TriggerHandler Trigger;
 
-        static string expression = "({\\s*\"CameraDateTime\":\\s*\"([0-9]{2}\\/[0-9]{2}\\/[0-9]{2}\\s[0-9]{2}:[0-9]{2}:[0-9]{2})\\s *\",\\s*\"SystemDateTime\":\\s*\"([0-9]{2}\\/[0-9]{2}\\/[0-9]{4}\\s[0-9]{2}:[0-9]{2}:[0-9]{2})\\s*\",\\s*\"ImageName\":\\s*\"([0-9]{14}-[0-9]+)\"\\s*})";
+        static string expression = "[.\\s}{:,_-]*[A-z0-9]*({\\s*\"CameraDateTime\":\\s*\"([0-9]{2}\\/[0-9]{2}\\/[0-9]{2}\\s[0-9]{2}:[0-9]{2}:[0-9]{2})\\s *\",\\s*\"SystemDateTime\":\\s*\"([0-9]{2}\\/[0-9]{2}\\/[0-9]{4}\\s[0-9]{2}:[0-9]{2}:[0-9]{2})\\s*\",\\s*\"ImageName\":\\s*\"([0-9]{14}-[0-9]+)\",\\s*\"TempoCaptura\":\\s*\"[0-9]+\"\\s*})";
         Regex rgx = new Regex(expression);
 
 
